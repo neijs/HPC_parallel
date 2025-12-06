@@ -7,16 +7,14 @@
 
 typedef struct {
     double *a, *b, *F, *D;
-    int M, N;
-    int size;
+    int M, N, size;
     double x_min, y_min;
     double hx, hy, ieps;
     double ihx, ihy, ihx2, ihy2, hxhy;
     double delta;
     
     int rank, num_procs;            
-    int global_M, global_N;       
-    int global_size;
+    int global_M, global_N, global_size;       
     double global_x_min, global_x_max;
     double global_y_min, global_y_max;
     
@@ -25,7 +23,7 @@ typedef struct {
     double *left_ghost, *right_ghost, *top_ghost, *bottom_ghost;
 
     int cg_iter;
-    double *result, *error, *residual, *energy_func;
+    double *result, *error, *energy_func;
     int *offsets, *sizes;
 } CGParams;
 
@@ -70,7 +68,8 @@ void compute_subdomain_num(CGParams *cg_params, int *proc_rows, int *proc_cols) 
     int global_N = cg_params->global_N;
     int num_procs = cg_params->num_procs;
 
-    if ((global_M == 400) && (global_N == 600)) {
+    /* ----- Lazy approach, but good enough for the task ----- */
+    if (((global_M == 400) && (global_N == 600)) || ((global_M == 800) && (global_N == 1200))) {
         switch (num_procs)
         {
         case 1:
@@ -93,6 +92,9 @@ void compute_subdomain_num(CGParams *cg_params, int *proc_rows, int *proc_cols) 
             *proc_rows = 4;
             *proc_cols = 4;
             break;
+        case 20: /* ! Special case for Kolganov A. ! */
+            *proc_rows = 4;
+            *proc_cols = 5;
         case 32:
             *proc_rows = 4;
             *proc_cols = 8;
@@ -105,46 +107,10 @@ void compute_subdomain_num(CGParams *cg_params, int *proc_rows, int *proc_cols) 
             printf("Incorrect number of procs.\r\n");
             break;
         }
-    } else if ((global_M == 800) && (global_N == 1200)) {
-        switch (num_procs)
-        {
-        case 1:
-            *proc_rows = 1;
-            *proc_cols = 1;
-            break;
-        case 2:
-            *proc_rows = 1;
-            *proc_cols = 2;
-            break;
-        case 4:
-            *proc_rows = 2;
-            *proc_cols = 2;
-            break;
-        case 8:
-            *proc_rows = 2;
-            *proc_cols = 4;
-            break;
-        case 16:
-            *proc_rows = 4;
-            *proc_cols = 4;
-            break;
-        case 32:
-            *proc_rows = 4;
-            *proc_cols = 8;
-            break;
-        case 64:
-            *proc_rows = 8;
-            *proc_cols = 8;
-            break;
-        default:
-            printf("Incorrect number of procs.\r\n");
-            break;
-        }
-
     } else {
         printf("Too bad you have chosen a lazy approach.\r\n");
     }
-    /* Lazy approach, but good enough for the task */
+    /* ----- Lazy approach, but good enough for the task ----- */
 }
 
 void set_subdomain_size(CGParams *cg_params) {
@@ -199,7 +165,6 @@ void set_subdomain_size(CGParams *cg_params) {
         cg_params->result      = (double*)malloc(global_size*sizeof(double));
         cg_params->error       = (double*)malloc(global_size*sizeof(double));
         cg_params->energy_func = (double*)malloc(global_size*sizeof(double));
-        cg_params->residual    = (double*)malloc(global_size*sizeof(double));
     }
 }
 
@@ -221,7 +186,6 @@ void free_cg_results(CGParams *cg_params) {
     free(cg_params->result);
     free(cg_params->error);
     free(cg_params->energy_func);
-    free(cg_params->residual);
     free(cg_params->offsets);
     free(cg_params->sizes);
 }
@@ -623,9 +587,7 @@ void compute_cg_solution(CGParams *cg_params) {
     MPI_Allreduce(&old_zr, &global_old_zr, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     old_zr = global_old_zr;
 
-    // printf("da-da?\r\n");
     exchange_ghost_cells(cg_params, p);
-    // printf("ale?\r\n");
     compute_Ap(cg_params, Ap, p); 
 
     denom = dot(cg_params, Ap, p);
@@ -671,7 +633,6 @@ void compute_cg_solution(CGParams *cg_params) {
         
         if (cg_params->rank == 0) {
             cg_params->error[cg_iter] = delta;
-            // difference[cg_iter] = norm(cg_params, r); // невязка
         }
         if (delta < cg_params->delta) {
             if (cg_params->rank == 0) {
@@ -741,9 +702,9 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     /* ----- Define the domain ----- */
-    int M = 800, N = 1200;
-    double x_min = -3.1, x_max = 3.1;
-    double y_min = -0.1, y_max = 2.1;
+    int M = 400, N = 600;
+    double x_min = -3.0, x_max = 3.0;
+    double y_min =  0.0, y_max = 2.0;
     double delta = 1e-10;
     /* ----- Define the domain ----- */
 
@@ -757,6 +718,7 @@ int main(int argc, char** argv) {
     /* ----- Initialize CG parameters ----- */
 
     /* ----- Compute CG coefficients ----- */
+    MPI_Barrier(MPI_COMM_WORLD);
     double params_start = MPI_Wtime();
     compute_cg_params(cg_params);
     compute_cg_d(cg_params);
