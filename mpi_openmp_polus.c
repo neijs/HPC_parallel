@@ -3,18 +3,21 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <omp.h>
 #include <mpi.h>
 
 typedef struct {
     double *a, *b, *F, *D;
-    int M, N, size;
+    int M, N;
+    int size;
     double x_min, y_min;
     double hx, hy, ieps;
     double ihx, ihy, ihx2, ihy2, hxhy;
     double delta;
     
     int rank, num_procs;            
-    int global_M, global_N, global_size;       
+    int global_M, global_N;       
+    int global_size;
     double global_x_min, global_x_max;
     double global_y_min, global_y_max;
     
@@ -23,7 +26,7 @@ typedef struct {
     double *left_ghost, *right_ghost, *top_ghost, *bottom_ghost;
 
     int cg_iter;
-    double *result, *error, *energy_func;
+    double *result, *error, *residual, *energy_func;
     int *offsets, *sizes;
 } CGParams;
 
@@ -162,6 +165,7 @@ void set_subdomain_size(CGParams *cg_params) {
         cg_params->result      = (double*)malloc(global_size*sizeof(double));
         cg_params->error       = (double*)malloc(global_size*sizeof(double));
         cg_params->energy_func = (double*)malloc(global_size*sizeof(double));
+        cg_params->residual    = (double*)malloc(global_size*sizeof(double));
     }
 }
 
@@ -170,12 +174,12 @@ void set_cg_constants(CGParams *cg_params, double delta) {
     double hy = cg_params->hy;
     double eps = (hx > hy) ? (hx*hx) : (hy*hy);
 
-    cg_params->hxhy = hx*hy;
-    cg_params->ihx = 1.0/hx;
-    cg_params->ihy = 1.0/hy;
-    cg_params->ihx2 = 1.0/(hx*hx);
-    cg_params->ihy2 = 1.0/(hy*hy);
-    cg_params->ieps = 1.0/eps;
+    cg_params->hxhy  = hx*hy;
+    cg_params->ihx   = 1.0/hx;
+    cg_params->ihy   = 1.0/hy;
+    cg_params->ihx2  = 1.0/(hx*hx);
+    cg_params->ihy2  = 1.0/(hy*hy);
+    cg_params->ieps  = 1.0/eps;
     cg_params->delta = delta;
 }
 
@@ -183,6 +187,7 @@ void free_cg_results(CGParams *cg_params) {
     free(cg_params->result);
     free(cg_params->error);
     free(cg_params->energy_func);
+    free(cg_params->residual);
     free(cg_params->offsets);
     free(cg_params->sizes);
 }
@@ -216,6 +221,7 @@ void compute_cg_params(CGParams *cg_params) {
     double *F = cg_params->F;
 
     /* ----- Compute a ----- */
+    #pragma omp parallel for collapse(2)
     for (int i = 0; i < M + 1; i++) {
         for (int j = 0; j < N; j++) {
             int idx = i*N + j;
@@ -269,6 +275,7 @@ void compute_cg_params(CGParams *cg_params) {
     /* ----- Compute a ----- */
 
     /* ----- Compute b ----- */
+    #pragma omp parallel for collapse(2)
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N + 1; j++) {
             int idx = i*(N + 1) + j;
@@ -300,6 +307,7 @@ void compute_cg_params(CGParams *cg_params) {
     /* ----- Compute b ----- */
 
     /* ----- Compute F ----- */
+    #pragma omp parallel for collapse(2)
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
             int idx = i*N + j;
@@ -329,6 +337,7 @@ void compute_cg_d(CGParams *cg_params) {
     double *b = cg_params->b;
     double *D = cg_params->D;
 
+    #pragma omp parallel for collapse(2)
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
             int idx = i*N + j;
@@ -448,6 +457,7 @@ void compute_Ap(CGParams *cg_params, double *Ap, double *p) {
     double *top_ghost    = cg_params->top_ghost;
     double *bottom_ghost = cg_params->bottom_ghost;
 
+    #pragma omp parallel for collapse(2)
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
             int idx = i*N + j;
@@ -517,6 +527,7 @@ void compute_Z(CGParams *cg_params, double *z, double *r) {
     int size = cg_params->size;
     double *D = cg_params->D;
 
+    #pragma omp parallel for simd
     for (int i = 0; i < size; i++) {
         z[i] = r[i]*D[i];
     }
@@ -527,6 +538,7 @@ double dot(CGParams *cg_params, double *v, double *w) {
     double hxhy = cg_params->hxhy;
     
     double dot_product = 0;
+    #pragma omp parallel for simd reduction(+:dot_product)
     for (int i = 0; i < size; i++) {
         dot_product += v[i]*w[i];
     }
@@ -539,6 +551,7 @@ double norm(CGParams *cg_params, double *v) {
 }
 
 void array_sumc(double *v, double *w, double *sumc, int size, double coef) {
+    #pragma omp parallel for simd
     for (int i = 0; i < size; i++) {
         sumc[i] = v[i] + w[i]*coef;
     }
@@ -547,8 +560,9 @@ void array_sumc(double *v, double *w, double *sumc, int size, double coef) {
 double compute_cg_energy(CGParams *cg_params, double *r, double *w) {
     int size  = cg_params->size;
     double *F = cg_params->F;
-
+    
     double energy = 0.0;
+    #pragma omp parallel for simd reduction(+:energy)
     for (int i = 0; i < size; i++) {
         energy += (F[i] + r[i]) * w[i];
     }
@@ -694,12 +708,13 @@ void write_cg_results(CGParams *cg_params) {
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
+
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     /* ----- Define the domain ----- */
-    int M = 400, N = 600;
+    int M = 800, N = 1200;
     double x_min = -3.0, x_max = 3.0;
     double y_min =  0.0, y_max = 2.0;
     double delta = 1e-10;
